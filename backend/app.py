@@ -20,8 +20,8 @@ TOP_K = 12
 KEYWORD_BOOST = 0.5
 
 SOURCE_PRIORITY = {
-    "cv": 3.0,
-    "skills": 2.0,
+    "cv": 1.1,
+    "skills": 1.2,
     "projekte": 1.0,
     "default": 0.5
 }
