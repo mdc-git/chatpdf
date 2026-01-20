@@ -1,0 +1,19 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Build artifacts
+llama.cpp/
+
+# Downloaded models
+models/*.gguf
+
+# Index (regenerated from PDFs)
+index/
+
+# PDFs (user data)
+pdfs/
+
+# OS
+.DS_Store
