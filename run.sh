@@ -35,7 +35,7 @@ trap cleanup SIGINT SIGTERM
 echo "Starting llama-server on port 8080..."
 ./llama.cpp/build/bin/llama-server \
     -m ./models/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf \
-    -t $(nproc) -c 4096 \
+    -t $(nproc) -c 8192 -np 1 \
     --host 127.0.0.1 --port 8080 &
 LLAMA_PID=$!
 

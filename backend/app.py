@@ -16,7 +16,7 @@ from fastembed import TextEmbedding
 # Config
 INDEX_DIR = Path(__file__).parent.parent / "index"
 LLAMA_SERVER = "http://127.0.0.1:8080"
-TOP_K = 12
+TOP_K = 8
 KEYWORD_BOOST = 5.0  # Huge boost for keyword matches to outrank semantic-only matches
 
 SOURCE_PRIORITY = {
@@ -88,12 +88,19 @@ def health():
     return {"status": "ok", "chunks": index.ntotal if index else 0}
 
 
+def normalize_text(text: str) -> str:
+    """Normalize text by removing dots, dashes, underscores for fuzzy matching."""
+    return re.sub(r'[.\-_]', '', text.lower())
+
+
 def extract_keywords(text: str) -> set[str]:
-    """Extract meaningful words from query."""
-    words = re.findall(r'\b[a-zA-Z]{3,}\b', text.lower())
-    # Stopwords + ubiquitous terms in this corpus + generic query words
+    """Extract meaningful words from query, normalized for fuzzy matching."""
+    normalized = normalize_text(text)
+    words = re.findall(r'\b[a-zA-Z]{3,}\b', normalized)
     stopwords = {
-        'the', 'and', 'for', 'with', 'what', 'does', 'has', 'have', 'how', 'who', 'where', 'when', 'which', 'about', 'know', 'use', 'conrad', 'emde'
+        'the', 'and', 'for', 'with', 'what', 'does', 'has', 'have', 'how', 'who', 'where', 'when', 'which', 'about', 'know', 'use', 'conrad', 'emde',
+        'role', 'work', 'worked', 'experience', 'using', 'used', 'from', 'till', 'since', 'during', 'his', 'her', 'their', 'was', 'were', 'been',
+        'about', 'info', 'information', 'details', 'tell', 'show', 'list', 'provide', 'developer', 'senior', 'junior', 'lead', 'engineer'
     }
     return {w for w in words if w not in stopwords}
 
@@ -122,7 +129,8 @@ async def chat(req: ChatRequest):
             text_lower = chunk["text"].lower()
 
             # Keyword boost: add score for each keyword found
-            matched_kws = [kw for kw in keywords if kw in text_lower]
+            text_normalized = normalize_text(chunk["text"])
+            matched_kws = [kw for kw in keywords if kw in text_normalized]
             keyword_score = len(matched_kws) * KEYWORD_BOOST
             source_boost = get_source_boost(chunk["source"])
             combined_score = float(scores[0][i]) + keyword_score + source_boost
@@ -135,8 +143,8 @@ async def chat(req: ChatRequest):
 
     # Reorder: put chunks with keyword matches first (helps small LLMs)
     def has_keyword(chunk):
-        text_lower = chunk["text"].lower()
-        return any(kw in text_lower for kw in keywords)
+        text_normalized = normalize_text(chunk["text"])
+        return any(kw in text_normalized for kw in keywords)
 
     with_keywords = [(s, c) for s, c in candidates if has_keyword(c)]
     without_keywords = [(s, c) for s, c in candidates if not has_keyword(c)]
@@ -144,8 +152,8 @@ async def chat(req: ChatRequest):
 
     contexts = []
     sources = []
-    for score, chunk in candidates:
-        contexts.append(chunk["text"])
+    for i, (score, chunk) in enumerate(candidates):
+        contexts.append(f"[Segment {i+1}] Source: {chunk['source']}\n{chunk['text']}")
         sources.append({
             "source": chunk["source"],
             "chunk_id": chunk["chunk_id"],
@@ -163,31 +171,57 @@ async def chat(req: ChatRequest):
             sources=[]
         )
 
-    # Build prompt
+    # Build prompts
+    system_parts = [
+        "You are an expert assistant answering professional history questions using ONLY the provided documents.",
+        "Your goal is to provide spot-on, accurate answers based on the provided context.",
+        "",
+        "ANALYSIS PROTOCOL:",
+        "1. Identify the SUBJECT (company/project) and the ASPECT (tool/skill) in the query.",
+        "2. Locate which [Segment] contains the SUBJECT.",
+        "3. Locate which [Segment] contains the ASPECT.",
+        "4. If they are in DIFFERENT segments and no direct link is stated in the text, you MUST NOT connect them.",
+        "",
+        "RULES:",
+        "- **NO CROSS-SEGMENT CONNECTIONS:** You must find the Company and the Tool in the SAME [Segment] to state they are related.",
+        "- **ZERO INFERENCE:** If the link isn't literal and within the same segment, say: 'I don't have information about that in the provided documents.'",
+        "- Be brief and direct.",
+    ]
+    
     context_str = "\n\n---\n\n".join(contexts)
-    prompt = f"""Use ONLY the context below from Conrad Emde's CV, skills, and projects documents to answer the question. If the answer is not in the context, say "I don't have information about that in the provided documents." Do not add external knowledge.
-
-Context:
-{context_str}
-
-Question: {req.question}
-
-Answer:"""
+    
+    user_parts = [
+        "CONTEXT:",
+        context_str,
+        "",
+        "QUESTION: " + req.question,
+        "",
+        "ANSWER:"
+    ]
+    
+    system_prompt = "\n".join(system_parts)
+    user_prompt = "\n".join(user_parts)
 
     # Call llama-server
     try:
         resp = await http_client.post(
             f"{LLAMA_SERVER}/v1/chat/completions",
             json={
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.3,
-                "max_tokens": 768,
-                "repeat_penalty": 1.2
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                "temperature": 0.0,
+                "max_tokens": 512,
+                "repeat_penalty": 1.1
             }
         )
         resp.raise_for_status()
         data = resp.json()
         answer = data["choices"][0]["message"]["content"]
+    except httpx.HTTPStatusError as e:
+        print(f"LLM Error Body: {e.response.text}")
+        raise HTTPException(503, f"LLM server error: {e}")
     except httpx.RequestError as e:
         raise HTTPException(503, f"LLM server error: {e}")
 
