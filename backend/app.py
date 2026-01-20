@@ -93,8 +93,7 @@ def extract_keywords(text: str) -> set[str]:
     words = re.findall(r'\b[a-zA-Z]{3,}\b', text.lower())
     # Stopwords + ubiquitous terms in this corpus + generic query words
     stopwords = {
-        'the', 'and', 'for', 'with', 'what', 'does', 'has', 'have', 'how', 'who', 'where', 'when', 'which', 'about', 'know', 'use', 'work', 'worked', 'conrad', 'emde',
-        'experience', 'skills', 'skill', 'background', 'proficiency', 'expert', 'knowledge', 'familiar'
+        'the', 'and', 'for', 'with', 'what', 'does', 'has', 'have', 'how', 'who', 'where', 'when', 'which', 'about', 'know', 'use', 'conrad', 'emde'
     }
     return {w for w in words if w not in stopwords}
 
