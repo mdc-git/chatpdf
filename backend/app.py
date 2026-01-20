@@ -12,6 +12,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from fastembed import TextEmbedding
+from langdetect import detect, LangDetectException
+from stop_words import get_stop_words
 
 # Config
 INDEX_DIR = Path(__file__).parent.parent / "index"
@@ -89,13 +91,16 @@ def health():
 
 
 def normalize_text(text: str) -> str:
-    """Normalize text by removing dots, dashes, underscores for fuzzy matching."""
-    return re.sub(r'[.\-_]', '', text.lower())
+    """Normalize text by removing dots, underscores, replacing dashes with spaces for fuzzy matching."""
+    text = text.lower()
+    text = re.sub(r'[._]', '', text)  # Remove dots and underscores
+    text = re.sub(r'-', ' ', text)    # Replace dashes with spaces to split hyphenated words
+    return text
 
 
 # Query expansion: map query signals to document terms
 QUERY_EXPANSIONS = {
-    # Employment-related queries
+    # Employment-related queries (English)
     'work': ['gmbh', 'bellissy', 'winlocal', 'futureship', 'iwm', 'professional experience', 'software developer'],
     'worked': ['gmbh', 'bellissy', 'winlocal', 'futureship', 'iwm', 'professional experience'],
     'job': ['gmbh', 'bellissy', 'winlocal', 'futureship', 'iwm', 'software developer'],
@@ -107,6 +112,55 @@ QUERY_EXPANSIONS = {
     'experience': ['professional experience', 'bellissy', 'winlocal', 'futureship'],
     'career': ['professional experience', 'bellissy', 'winlocal', 'futureship', 'iwm'],
     'history': ['professional experience', 'bellissy', 'winlocal', 'futureship', 'iwm'],
+    # Employment-related queries (German)
+    'gearbeitet': ['gmbh', 'bellissy', 'winlocal', 'futureship', 'iwm', 'professional experience', 'software developer'],
+    'arbeit': ['gmbh', 'bellissy', 'winlocal', 'futureship', 'iwm', 'professional experience'],
+    'arbeitet': ['gmbh', 'bellissy', 'winlocal', 'futureship', 'iwm', 'professional experience'],
+    'arbeitgeber': ['gmbh', 'bellissy', 'winlocal', 'futureship', 'iwm'],
+    'firma': ['gmbh', 'bellissy', 'winlocal', 'futureship', 'iwm'],
+    'firmen': ['gmbh', 'bellissy', 'winlocal', 'futureship', 'iwm'],
+    'unternehmen': ['gmbh', 'bellissy', 'winlocal', 'futureship', 'iwm'],
+    'beruf': ['gmbh', 'bellissy', 'winlocal', 'futureship', 'iwm', 'software developer'],
+    'berufserfahrung': ['gmbh', 'bellissy', 'winlocal', 'futureship', 'iwm', 'professional experience'],
+    'erfahrung': ['professional experience', 'bellissy', 'winlocal', 'futureship'],
+    'karriere': ['professional experience', 'bellissy', 'winlocal', 'futureship', 'iwm'],
+    'laufbahn': ['professional experience', 'bellissy', 'winlocal', 'futureship', 'iwm'],
+    # Education-related queries (English)
+    'study': ['university', 'koblenz', 'diploma', 'education', 'degree'],
+    'studied': ['university', 'koblenz', 'diploma', 'education', 'degree'],
+    'education': ['university', 'koblenz', 'diploma', 'degree', 'courses'],
+    'degree': ['diploma', 'university', 'koblenz', 'computer science'],
+    'university': ['koblenz', 'diploma', 'education', 'degree'],
+    'courses': ['workshop', 'training', 'scrum', 'adwords'],
+    # Education-related queries (German)
+    'studiert': ['universität', 'koblenz', 'diplom', 'bildung'],
+    'studium': ['universität', 'koblenz', 'diplom', 'bildung'],
+    'ausbildung': ['universität', 'koblenz', 'diplom', 'education'],
+    'abschluss': ['diplom', 'universität', 'koblenz'],
+    # General/vague queries - expand to key document terms
+    'background': ['professional experience', 'skills', 'bellissy', 'winlocal', 'software developer'],
+    'summary': ['professional experience', 'skills', 'bellissy', 'winlocal', 'software developer'],
+    'profile': ['professional experience', 'skills', 'software developer', 'backend'],
+    'overview': ['professional experience', 'skills', 'bellissy', 'winlocal', 'software developer'],
+    'hintergrund': ['professional experience', 'skills', 'bellissy', 'winlocal', 'software developer'],
+    'zusammenfassung': ['professional experience', 'skills', 'bellissy', 'winlocal'],
+    'profil': ['professional experience', 'skills', 'software developer', 'backend'],
+    # Skills/technology queries - boost SKILLS.pdf
+    'skill': ['skills', 'extended technical skills', 'core stack'],
+    'skills': ['skills', 'extended technical skills', 'core stack'],
+    'erfahrung': ['skills', 'extended technical skills', 'professional experience'],
+    'kennt': ['skills', 'extended technical skills', 'core stack'],
+    'kenntnisse': ['skills', 'extended technical skills', 'core stack'],
+    'technologie': ['skills', 'extended technical skills', 'core stack'],
+    'technologien': ['skills', 'extended technical skills', 'core stack'],
+    'tech': ['skills', 'extended technical skills', 'core stack'],
+    'stack': ['skills', 'extended technical skills', 'core stack'],
+    'tools': ['skills', 'extended technical skills', 'core stack'],
+    'framework': ['skills', 'extended technical skills', 'core stack'],
+    'frameworks': ['skills', 'extended technical skills', 'core stack'],
+    'devops': ['skills', 'docker', 'jenkins', 'ansible', 'deployment'],
+    'infrastructure': ['skills', 'docker', 'hetzner', 'deployment'],
+    'infrastruktur': ['skills', 'docker', 'hetzner', 'deployment'],
 }
 
 
@@ -117,19 +171,80 @@ def expand_query(text: str) -> set[str]:
     for trigger, expansions in QUERY_EXPANSIONS.items():
         if trigger in text_lower:
             expanded.update(expansions)
+
+    # Fallback for vague queries about the person with no specific triggers
+    person_refs = ['conrad', 'emde', 'him', 'his', 'person', 'candidate', 'er', 'ihn', 'sein']
+    has_person_ref = any(ref in text_lower for ref in person_refs)
+    vague_verbs = ['tell', 'about', 'describe', 'who is', 'erzähl', 'über', 'wer ist', 'beschreib']
+    has_vague_verb = any(v in text_lower for v in vague_verbs)
+
+    if has_person_ref and has_vague_verb and not expanded:
+        # Very vague query - add general expansion
+        expanded.update(['professional experience', 'skills', 'bellissy', 'winlocal', 'software developer', 'backend'])
+
     return expanded
 
 
-def extract_keywords(text: str) -> set[str]:
+def is_skill_query(text: str) -> bool:
+    """Detect if query is asking about skills/technologies."""
+    text_lower = text.lower()
+    # Patterns that indicate skill questions (DE + EN)
+    skill_patterns = [
+        'erfahrung', 'experience', 'worked with',
+        'kennt', 'knows', 'know ',
+        'verwendet', 'used', 'using',
+        'gearbeitet', 'worked',
+        'kann ', 'can ', 'able to',
+        'beherrscht', 'proficient',
+        'skill', 'technologie', 'technology',
+        'tool', 'framework', 'library',
+    ]
+    if any(p in text_lower for p in skill_patterns):
+        return True
+
+    # Also check for known tech names / single word tech queries
+    tech_names = {'kubernetes', 'docker', 'git', 'ansible', 'nodejs', 'python', 'php', 'javascript', 'typescript', 'react', 'vue', 'svelte', 'graphql', 'rest', 'sql', 'mysql', 'postgres', 'mongodb', 'redis', 'elasticsearch', 'nginx', 'apache', 'jenkins', 'gitlab', 'kubernetes'}
+    words = set(text_lower.replace('-', ' ').replace('?', '').split())
+    return bool(words & tech_names)
+
+
+def is_german_query(text: str) -> bool:
+    """Detect if query is in German using langdetect with fallback."""
+    try:
+        # Only try langdetect if text is long enough
+        if len(text) < 5:
+            # For very short queries, check for German characters or patterns
+            german_indicators = {'ä', 'ö', 'ü', 'ß', '?'}
+            if any(c in text.lower() for c in german_indicators):
+                return True
+            return False
+
+        lang = detect(text)
+        return lang == 'de'
+    except LangDetectException:
+        # Fallback: if detection fails, assume English
+        return False
+
+
+def extract_keywords(text: str, is_german: bool = None) -> set[str]:
     """Extract meaningful words from query, normalized for fuzzy matching."""
     normalized = normalize_text(text)
     words = re.findall(r'\b[a-zA-Z]{3,}\b', normalized)
-    stopwords = {
-        'the', 'and', 'for', 'with', 'what', 'does', 'has', 'have', 'how', 'who', 'where', 'when', 'which', 'about', 'know', 'use', 'conrad', 'emde',
-        'role', 'using', 'used', 'from', 'till', 'since', 'during', 'his', 'her', 'their', 'was', 'were', 'been',
-        'about', 'info', 'information', 'details', 'tell', 'show', 'list', 'provide', 'did', 'can', 'could', 'would', 'should'
-    }
-    return {w for w in words if w not in stopwords}
+
+    # Use standard stopwords + domain-specific
+    if is_german is None:
+        try:
+            is_german = detect(text) == 'de'
+        except:
+            is_german = False
+
+    lang = 'german' if is_german else 'english'
+    std_stopwords = set(get_stop_words(lang))
+
+    # Domain-specific stopwords (person name, generic terms)
+    domain_stopwords = {'conrad', 'emde', 'info', 'information', 'details', 'provide'}
+
+    return {w for w in words if w not in std_stopwords and w not in domain_stopwords}
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -137,10 +252,26 @@ async def chat(req: ChatRequest):
     if not req.question.strip():
         raise HTTPException(400, "Question cannot be empty")
 
+    # Detect language and query type early for source boosting
+    is_german = is_german_query(req.question)
+    is_skill = is_skill_query(req.question)
+
+    # For very short queries, assume German if it looks like a German tech question
+    if not is_german and is_skill and req.question.endswith('?') and len(req.question) < 30:
+        # Single tech word followed by ? - likely German from DE docs
+        is_german = True
+
     # Extract keywords for boosting + query expansion
-    keywords = extract_keywords(req.question)
+    keywords = extract_keywords(req.question, is_german)
     expanded = expand_query(req.question)
     keywords = keywords | expanded
+
+    # For skill queries, also add the raw query words (to catch tech names like "Kubernetes")
+    if is_skill:
+        raw_words = set(re.findall(r'\b[a-zA-Z]{2,}\b', req.question.lower()))
+        # Add all words except common question words
+        question_words = {'hat', 'ist', 'mit', 'dem', 'der', 'die', 'das', 'ein', 'eine', 'haben', 'gibt', 'gibt', 'welche', 'welcher', 'was', 'wie', 'erfahrung', 'experience', 'kennt', 'knows', 'verwendet', 'used'}
+        keywords = keywords | (raw_words - question_words)
 
     # Embed query
     query_vec = list(embedder.embed([req.question]))
@@ -162,6 +293,15 @@ async def chat(req: ChatRequest):
             matched_kws = [kw for kw in keywords if kw in text_normalized]
             keyword_score = len(matched_kws) * KEYWORD_BOOST
             source_boost = get_source_boost(chunk["source"])
+
+            # Boost German docs for German queries
+            if is_german and 'projekt' in chunk["source"].lower():
+                source_boost += 2.0
+
+            # Boost SKILLS.pdf for skill/technology queries
+            if is_skill and 'skill' in chunk["source"].lower():
+                source_boost += 3.0
+
             combined_score = float(scores[0][i]) + keyword_score + source_boost
 
             candidates.append((combined_score, chunk))
@@ -197,21 +337,39 @@ async def chat(req: ChatRequest):
     # Without keyword match: score = semantic (~0.3) + source (1.0) = ~1.3
     MIN_RELEVANCE_SCORE = 1.5
     if candidates[0][0] < MIN_RELEVANCE_SCORE:
+        # For skill queries, try German response if looks like German question
+        no_info_msg = "I don't have information about that in the provided documents."
+        if is_skill and any(c in req.question.lower() for c in {'ä', 'ö', 'ü', 'ß', '?'}):
+            no_info_msg = "Diese Information ist in den Dokumenten nicht enthalten."
         return ChatResponse(
-            answer="I don't have information about that in the provided documents.",
+            answer=no_info_msg,
             sources=[]
         )
 
     # Build prompts
     system_parts = [
-        "You are an assistant answering questions about Conrad Emde's professional background using the provided document segments.",
+        "You are an assistant answering questions about a candidate's professional background using the provided document segments.",
         "",
         "RULES:",
         "- Answer ONLY using information from the provided segments.",
         "- List ALL relevant items found across ALL segments when asked for lists.",
+        "- When asked about work/employers/jobs, the ONLY employers are: Bellissy GmbH, WinLocal GmbH, FutureShip GmbH, IWM Koblenz.",
+        "- IMPORTANT: Using a tool/API (like Google AdWords) does NOT mean working AT that company. Only list actual employers.",
+        "- Do NOT mix information from different projects or companies.",
         "- Be comprehensive but concise.",
         "- If the information is not in the segments, say so.",
     ]
+
+    if is_german:
+        system_parts.extend([
+            "",
+            "DEUTSCHE ANFRAGE - Antworte AUF DEUTSCH:",
+            "- Antworte IMMER auf Deutsch, niemals auf Englisch.",
+            "- Gib vollständige, detaillierte Antworten - nicht nur Stichpunkte.",
+            "- Bei 'keine Information': Sage 'Diese Information ist in den Dokumenten nicht enthalten.'",
+            "- Liste ALLE relevanten Arbeitgeber auf: Bellissy GmbH, WinLocal GmbH, FutureShip GmbH, IWM Koblenz.",
+            "- Nutze auch Inhalte aus deutschen Dokumenten (PROJEKTE.pdf).",
+        ])
     
     context_str = "\n\n---\n\n".join(contexts)
     
@@ -236,8 +394,8 @@ async def chat(req: ChatRequest):
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                "temperature": 0.0,
-                "max_tokens": 512,
+                "temperature": 0.2 if is_german else 0.0,  # Slightly more natural for German
+                "max_tokens": 768 if is_german else 512,   # German text tends to be longer
                 "repeat_penalty": 1.1
             }
         )
