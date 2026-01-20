@@ -17,11 +17,11 @@ from fastembed import TextEmbedding
 INDEX_DIR = Path(__file__).parent.parent / "index"
 LLAMA_SERVER = "http://127.0.0.1:8080"
 TOP_K = 12
-KEYWORD_BOOST = 0.5
+KEYWORD_BOOST = 5.0  # Huge boost for keyword matches to outrank semantic-only matches
 
 SOURCE_PRIORITY = {
-    "cv": 1.1,
-    "skills": 1.2,
+    "cv": 1.0,
+    "skills": 1.0,
     "projekte": 1.0,
     "default": 0.5
 }
@@ -91,8 +91,11 @@ def health():
 def extract_keywords(text: str) -> set[str]:
     """Extract meaningful words from query."""
     words = re.findall(r'\b[a-zA-Z]{3,}\b', text.lower())
-    # Stopwords + ubiquitous terms in this corpus
-    stopwords = {'the', 'and', 'for', 'with', 'what', 'does', 'has', 'have', 'how', 'who', 'where', 'when', 'which', 'about', 'know', 'use', 'work', 'worked', 'conrad', 'emde'}
+    # Stopwords + ubiquitous terms in this corpus + generic query words
+    stopwords = {
+        'the', 'and', 'for', 'with', 'what', 'does', 'has', 'have', 'how', 'who', 'where', 'when', 'which', 'about', 'know', 'use', 'work', 'worked', 'conrad', 'emde',
+        'experience', 'skills', 'skill', 'background', 'proficiency', 'expert', 'knowledge', 'familiar'
+    }
     return {w for w in words if w not in stopwords}
 
 
@@ -153,9 +156,17 @@ async def chat(req: ChatRequest):
     if not contexts:
         return ChatResponse(answer="No relevant context found.", sources=[])
 
+    # Check if top result is relevant (threshold based on empirical scores ~0.8-1.0 for low relevance)
+    MIN_RELEVANCE_SCORE = 5.0
+    if candidates[0][0] < MIN_RELEVANCE_SCORE:
+        return ChatResponse(
+            answer="I don't have information about that in the provided documents.",
+            sources=[]
+        )
+
     # Build prompt
     context_str = "\n\n---\n\n".join(contexts)
-    prompt = f"""Based on Conrad Emde's CV and skills documentation below, answer the question.
+    prompt = f"""Use ONLY the context below from Conrad Emde's CV, skills, and projects documents to answer the question. If the answer is not in the context, say "I don't have information about that in the provided documents." Do not add external knowledge.
 
 Context:
 {context_str}
