@@ -10,6 +10,7 @@ import httpx
 import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from fastembed import TextEmbedding
 from langdetect import detect, LangDetectException
@@ -74,6 +75,15 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 class ChatRequest(BaseModel):
@@ -247,6 +257,72 @@ def extract_keywords(text: str, is_german: bool = None) -> set[str]:
     return {w for w in words if w not in std_stopwords and w not in domain_stopwords}
 
 
+async def rewrite_question(question: str, is_german: bool) -> str:
+    """Rewrite vague questions to be more specific for better retrieval."""
+    # For very short/vague questions, ask LLM to clarify
+    if is_german:
+        rewrite_prompt = f"""Reformuliere diese Frage präziser. Ersetze Pronomen mit konkreten Begriffen. Nur die reformulierte Frage zurückgeben, nichts anderes. Beziehe die Frage auf Conrad Emde.
+
+        Beispiele:
+        <example>
+        Original: "Firmen?"
+        Reformuliert: "Für welche Firmen hat Conrad Emde gearbeitet?"
+        </example>
+        <example>
+        Original: "seine Fähigkeiten?"
+        Reformuliert: "Welche Fähigkeiten hat Conrad Emde?"
+        </example>
+        <example>
+        Original: "docker?"
+        Reformuliert: "Welche beruflichen Erfahrungen hat Conrad Emde mit Docker?"
+        </example>
+
+Frage: {question}
+Reformuliert:"""
+        attach = " Gib eine ausführliche Antwort."
+    else:
+        rewrite_prompt = f"""Rewrite this question to be more specific. Replace pronouns with concrete terms. Return only the rewritten question, nothing else. Make the question about Conrad Emde.
+
+        Examples:
+        <example>
+        Original: "companies?"
+        Rewritten: "What companies has Conrad Emde worked for?"
+        </example>
+        <example>
+        Original: "his skills?"
+        Rewritten: "What skills does Conrad Emde have?"
+        </example>
+        <example>
+        Original: "docker?"
+        Rewritten: "What is Conrad Emde's professional experience with docker?"
+        </example>
+Question: {question}
+Rewritten:"""
+        attach = " Give a  detailed answer."
+
+    try:
+        resp = await http_client.post(
+            f"{LLAMA_SERVER}/v1/chat/completions",
+            json={
+                "messages": [{"role": "user", "content": rewrite_prompt}],
+                "temperature": 0.1,
+                "max_tokens": 100,
+                "repeat_penalty": 1.0
+            }
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        rewritten = data["choices"][0]["message"]["content"].strip()
+        print(f"Rewrote question: '{question}' -> '{rewritten + attach}'")
+        # Only use rewrite if it's different and not empty
+        if rewritten and rewritten != question and len(rewritten) < 200:
+            return rewritten + attach
+    except Exception:
+        pass  # Fall back to original question if rewriting fails
+
+    return question
+
+
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
     if not req.question.strip():
@@ -261,9 +337,12 @@ async def chat(req: ChatRequest):
         # Single tech word followed by ? - likely German from DE docs
         is_german = True
 
+    # Rewrite vague questions for better retrieval
+    search_question = await rewrite_question(req.question, is_german)
+
     # Extract keywords for boosting + query expansion
-    keywords = extract_keywords(req.question, is_german)
-    expanded = expand_query(req.question)
+    keywords = extract_keywords(search_question, is_german)
+    expanded = expand_query(search_question)
     keywords = keywords | expanded
 
     # For skill queries, also add the raw query words (to catch tech names like "Kubernetes")
@@ -383,7 +462,7 @@ async def chat(req: ChatRequest):
     ]
     
     system_prompt = "\n".join(system_parts)
-    user_prompt = "\n".join(user_parts)
+    user_prompt = system_prompt + "\n".join(user_parts)
 
     # Call llama-server
     try:
@@ -395,7 +474,7 @@ async def chat(req: ChatRequest):
                     {"role": "user", "content": user_prompt}
                 ],
                 "temperature": 0.2 if is_german else 0.0,  # Slightly more natural for German
-                "max_tokens": 768 if is_german else 512,   # German text tends to be longer
+                "max_tokens": 1024,   # German text tends to be longer
                 "repeat_penalty": 1.1
             }
         )
