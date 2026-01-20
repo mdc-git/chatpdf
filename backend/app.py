@@ -93,14 +93,41 @@ def normalize_text(text: str) -> str:
     return re.sub(r'[.\-_]', '', text.lower())
 
 
+# Query expansion: map query signals to document terms
+QUERY_EXPANSIONS = {
+    # Employment-related queries
+    'work': ['gmbh', 'bellissy', 'winlocal', 'futureship', 'iwm', 'professional experience', 'software developer'],
+    'worked': ['gmbh', 'bellissy', 'winlocal', 'futureship', 'iwm', 'professional experience'],
+    'job': ['gmbh', 'bellissy', 'winlocal', 'futureship', 'iwm', 'software developer'],
+    'jobs': ['gmbh', 'bellissy', 'winlocal', 'futureship', 'iwm', 'software developer'],
+    'employer': ['gmbh', 'bellissy', 'winlocal', 'futureship', 'iwm'],
+    'employers': ['gmbh', 'bellissy', 'winlocal', 'futureship', 'iwm'],
+    'company': ['gmbh', 'bellissy', 'winlocal', 'futureship', 'iwm'],
+    'companies': ['gmbh', 'bellissy', 'winlocal', 'futureship', 'iwm'],
+    'experience': ['professional experience', 'bellissy', 'winlocal', 'futureship'],
+    'career': ['professional experience', 'bellissy', 'winlocal', 'futureship', 'iwm'],
+    'history': ['professional experience', 'bellissy', 'winlocal', 'futureship', 'iwm'],
+}
+
+
+def expand_query(text: str) -> set[str]:
+    """Expand query with related terms from document vocabulary."""
+    text_lower = text.lower()
+    expanded = set()
+    for trigger, expansions in QUERY_EXPANSIONS.items():
+        if trigger in text_lower:
+            expanded.update(expansions)
+    return expanded
+
+
 def extract_keywords(text: str) -> set[str]:
     """Extract meaningful words from query, normalized for fuzzy matching."""
     normalized = normalize_text(text)
     words = re.findall(r'\b[a-zA-Z]{3,}\b', normalized)
     stopwords = {
         'the', 'and', 'for', 'with', 'what', 'does', 'has', 'have', 'how', 'who', 'where', 'when', 'which', 'about', 'know', 'use', 'conrad', 'emde',
-        'role', 'work', 'worked', 'experience', 'using', 'used', 'from', 'till', 'since', 'during', 'his', 'her', 'their', 'was', 'were', 'been',
-        'about', 'info', 'information', 'details', 'tell', 'show', 'list', 'provide', 'developer', 'senior', 'junior', 'lead', 'engineer'
+        'role', 'using', 'used', 'from', 'till', 'since', 'during', 'his', 'her', 'their', 'was', 'were', 'been',
+        'about', 'info', 'information', 'details', 'tell', 'show', 'list', 'provide', 'did', 'can', 'could', 'would', 'should'
     }
     return {w for w in words if w not in stopwords}
 
@@ -110,8 +137,10 @@ async def chat(req: ChatRequest):
     if not req.question.strip():
         raise HTTPException(400, "Question cannot be empty")
 
-    # Extract keywords for boosting
+    # Extract keywords for boosting + query expansion
     keywords = extract_keywords(req.question)
+    expanded = expand_query(req.question)
+    keywords = keywords | expanded
 
     # Embed query
     query_vec = list(embedder.embed([req.question]))
@@ -163,8 +192,10 @@ async def chat(req: ChatRequest):
     if not contexts:
         return ChatResponse(answer="No relevant context found.", sources=[])
 
-    # Check if top result is relevant (threshold based on empirical scores ~0.8-1.0 for low relevance)
-    MIN_RELEVANCE_SCORE = 5.0
+    # Check if top result is relevant
+    # With keyword match: score = semantic (~0.3) + keyword_boost (5.0) + source (1.0) = ~6.3
+    # Without keyword match: score = semantic (~0.3) + source (1.0) = ~1.3
+    MIN_RELEVANCE_SCORE = 1.5
     if candidates[0][0] < MIN_RELEVANCE_SCORE:
         return ChatResponse(
             answer="I don't have information about that in the provided documents.",
@@ -173,19 +204,13 @@ async def chat(req: ChatRequest):
 
     # Build prompts
     system_parts = [
-        "You are an expert assistant answering professional history questions using ONLY the provided documents.",
-        "Your goal is to provide spot-on, accurate answers based on the provided context.",
-        "",
-        "ANALYSIS PROTOCOL:",
-        "1. Identify the SUBJECT (company/project) and the ASPECT (tool/skill) in the query.",
-        "2. Locate which [Segment] contains the SUBJECT.",
-        "3. Locate which [Segment] contains the ASPECT.",
-        "4. If they are in DIFFERENT segments and no direct link is stated in the text, you MUST NOT connect them.",
+        "You are an assistant answering questions about Conrad Emde's professional background using the provided document segments.",
         "",
         "RULES:",
-        "- **NO CROSS-SEGMENT CONNECTIONS:** You must find the Company and the Tool in the SAME [Segment] to state they are related.",
-        "- **ZERO INFERENCE:** If the link isn't literal and within the same segment, say: 'I don't have information about that in the provided documents.'",
-        "- Be brief and direct.",
+        "- Answer ONLY using information from the provided segments.",
+        "- List ALL relevant items found across ALL segments when asked for lists.",
+        "- Be comprehensive but concise.",
+        "- If the information is not in the segments, say so.",
     ]
     
     context_str = "\n\n---\n\n".join(contexts)
