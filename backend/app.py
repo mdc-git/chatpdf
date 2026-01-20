@@ -16,7 +16,7 @@ from fastembed import TextEmbedding
 # Config
 INDEX_DIR = Path(__file__).parent.parent / "index"
 LLAMA_SERVER = "http://127.0.0.1:8080"
-TOP_K = 5
+TOP_K = 12
 KEYWORD_BOOST = 0.5
 
 # Globals
@@ -152,7 +152,7 @@ Answer:"""
             json={
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.3,
-                "max_tokens": 300,
+                "max_tokens": 768,
                 "repeat_penalty": 1.2
             }
         )
