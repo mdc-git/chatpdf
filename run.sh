@@ -3,6 +3,11 @@ set -e
 
 cd "$(dirname "$0")"
 
+# Kill any existing servers
+pkill -f "llama-server" 2>/dev/null || true
+pkill -f "uvicorn.*app" 2>/dev/null || true
+sleep 1
+
 # Check prerequisites
 if [ ! -f "llama.cpp/build/bin/llama-server" ]; then
     echo "Error: llama-server not built. Run ./bootstrap.sh first."

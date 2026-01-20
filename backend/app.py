@@ -19,6 +19,24 @@ LLAMA_SERVER = "http://127.0.0.1:8080"
 TOP_K = 12
 KEYWORD_BOOST = 0.5
 
+SOURCE_PRIORITY = {
+    "cv": 3.0,
+    "skills": 2.0,
+    "projekte": 1.0,
+    "default": 0.5
+}
+
+
+def get_source_boost(source: str) -> float:
+    src = source.lower()
+    if "cv" in src or "lebenslauf" in src:
+        return SOURCE_PRIORITY["cv"]
+    if "skill" in src:
+        return SOURCE_PRIORITY["skills"]
+    if "projekt" in src:
+        return SOURCE_PRIORITY["projekte"]
+    return SOURCE_PRIORITY["default"]
+
 # Globals
 index = None
 metadata = []
@@ -104,7 +122,8 @@ async def chat(req: ChatRequest):
             # Keyword boost: add score for each keyword found
             matched_kws = [kw for kw in keywords if kw in text_lower]
             keyword_score = len(matched_kws) * KEYWORD_BOOST
-            combined_score = float(scores[0][i]) + keyword_score
+            source_boost = get_source_boost(chunk["source"])
+            combined_score = float(scores[0][i]) + keyword_score + source_boost
 
             candidates.append((combined_score, chunk))
 
